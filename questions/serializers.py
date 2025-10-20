@@ -40,8 +40,7 @@ class QuestionListSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'teacher', 'created_at']
     
     def get_usage_count(self, obj):
-        # This will be implemented when exams module is ready
-        return 0
+        return obj.exam_questions.count()
 
 
 class QuestionDetailSerializer(serializers.ModelSerializer):
@@ -58,12 +57,19 @@ class QuestionDetailSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'teacher', 'created_at']
     
     def get_usage_count(self, obj):
-        # This will be implemented when exams module is ready
-        return 0
+        return obj.exam_questions.count()
     
     def get_used_in_exams(self, obj):
-        # This will be implemented when exams module is ready
-        return []
+        exam_questions = obj.exam_questions.all()
+        return [
+            {
+                'id': eq.exam.id,
+                'title': eq.exam.title,
+                'order': eq.order,
+                'code': eq.code
+            }
+            for eq in exam_questions
+        ]
 
 
 class QuestionCreateUpdateSerializer(serializers.ModelSerializer):
@@ -120,5 +126,4 @@ class QuestionMyQuestionsSerializer(serializers.ModelSerializer):
         return obj.answers.count()
     
     def get_usage_count(self, obj):
-        # This will be implemented when exams module is ready
-        return 0
+        return obj.exam_questions.count()

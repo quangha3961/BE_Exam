@@ -280,12 +280,7 @@ All error responses follow this format:
 - `404 Not Found`: Resource not found
 - `500 Internal Server Error`: Server error
 
-## Testing
 
-### Using the Test Script
-```bash
-python test_auth_api.py
-```
 
 ### Using curl
 ```bash

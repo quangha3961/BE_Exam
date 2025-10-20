@@ -21,8 +21,7 @@ class ClassListSerializer(serializers.ModelSerializer):
         return obj.students.count()
     
     def get_exam_count(self, obj):
-        # This will be implemented when exams module is ready
-        return 0
+        return obj.exams.count()
 
 
 class ClassDetailSerializer(serializers.ModelSerializer):
@@ -107,9 +106,12 @@ class StudentClassSerializer(serializers.ModelSerializer):
         return UserProfileSerializer(obj.class_obj.teacher).data
     
     def get_exam_count(self, obj):
-        # This will be implemented when exams module is ready
-        return 0
+        return obj.class_obj.exams.count()
     
     def get_available_exams(self, obj):
-        # This will be implemented when exams module is ready
-        return 0
+        from django.utils import timezone
+        now = timezone.now()
+        return obj.class_obj.exams.filter(
+            start_time__lte=now,
+            end_time__gte=now
+        ).count()
