@@ -43,6 +43,34 @@ class ExamSession(models.Model):
     
     def __str__(self):
         return f"{self.student.fullName} - {self.exam.title} ({self.status})"
+    
+    @property
+    def time_remaining(self):
+        """Calculate remaining time in seconds"""
+        if self.status != 'in_progress':
+            return 0
+        
+        from django.utils import timezone
+        from datetime import timedelta
+        
+        now = timezone.now()
+        exam_end_time = self.exam.end_time
+        session_end_time = self.start_time + timedelta(minutes=self.exam.minutes)
+        
+        # Use the earlier of exam end time or session time limit
+        actual_end_time = min(exam_end_time, session_end_time)
+        
+        if now >= actual_end_time:
+            return 0
+        
+        return int((actual_end_time - now).total_seconds())
+    
+    @property
+    def percentage(self):
+        """Calculate percentage score"""
+        if self.exam.total_score == 0:
+            return 0
+        return round((self.total_score / self.exam.total_score) * 100, 2)
 
 
 class StudentAnswer(models.Model):
