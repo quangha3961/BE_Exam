@@ -727,3 +727,340 @@ def log_page_action(request, session_id):
         'success': True,
         'message': 'Action logged successfully'
     })
+
+
+# Results API
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def get_my_results(request):
+    """
+    Get paginated results for the current student.
+    Supports filters: exam_id, class_id, status
+    """
+    results_qs = ExamResult.objects.filter(student=request.user)
+
+    # Filters
+    exam_id = request.GET.get('exam_id')
+    class_id = request.GET.get('class_id')
+    status_filter = request.GET.get('status')
+
+    if exam_id:
+        results_qs = results_qs.filter(exam_id=exam_id)
+    if class_id:
+        results_qs = results_qs.filter(exam__class_obj_id=class_id)
+    if status_filter:
+        results_qs = results_qs.filter(status=status_filter)
+
+    paginator = StandardResultsSetPagination()
+    page = paginator.paginate_queryset(results_qs.order_by('-submitted_at'), request)
+    serializer = ExamResultSerializer(page if page is not None else results_qs, many=True)
+
+    if page is not None:
+        return paginator.get_paginated_response(serializer.data)
+
+    return Response({
+        'success': True,
+        'data': {
+            'results': serializer.data,
+            'count': results_qs.count()
+        }
+    })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def get_class_results(request, class_id):
+    """
+    Get class results (teachers/admins).
+    Teachers can only view their own classes.
+    Optional filters: exam_id, status
+    """
+    # Basic access control
+    if request.user.role not in ['teacher', 'admin']:
+        return Response({'success': False, 'message': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+    # For teacher, ensure ownership
+    if request.user.role == 'teacher':
+        from classes.models import Class
+        try:
+            class_obj = Class.objects.get(id=class_id)
+        except Class.DoesNotExist:
+            return Response({'success': False, 'message': 'Class not found'}, status=status.HTTP_404_NOT_FOUND)
+        if class_obj.teacher != request.user:
+            return Response({'success': False, 'message': 'You can only view results for your own classes'}, status=status.HTTP_403_FORBIDDEN)
+
+    results_qs = ExamResult.objects.filter(exam__class_obj_id=class_id)
+
+    exam_id = request.GET.get('exam_id')
+    status_filter = request.GET.get('status')
+
+    if exam_id:
+        results_qs = results_qs.filter(exam_id=exam_id)
+    if status_filter:
+        results_qs = results_qs.filter(status=status_filter)
+
+    # Statistics
+    total_students = results_qs.values('student_id').distinct().count()
+    completed_exams = results_qs.filter(status='graded').count()
+    average_score = results_qs.aggregate(avg=Avg('total_score'))['avg'] or 0
+    highest_score = results_qs.aggregate(mx=Avg(Case(When(total_score__isnull=False, then='total_score'), output_field=IntegerField())))
+    highest_score = float(results_qs.order_by('-total_score').values_list('total_score', flat=True).first() or 0)
+    lowest_score = float(results_qs.order_by('total_score').values_list('total_score', flat=True).first() or 0)
+
+    # Grade distribution (simple buckets by letter grade)
+    grade_counts = {'A': 0, 'B': 0, 'C': 0, 'D': 0, 'F': 0}
+    for r in results_qs.values_list('percentage', flat=True):
+        p = float(r or 0)
+        if p >= 90:
+            grade_counts['A'] += 1
+        elif p >= 80:
+            grade_counts['B'] += 1
+        elif p >= 70:
+            grade_counts['C'] += 1
+        elif p >= 60:
+            grade_counts['D'] += 1
+        else:
+            grade_counts['F'] += 1
+
+    paginator = StandardResultsSetPagination()
+    page = paginator.paginate_queryset(results_qs.order_by('-submitted_at'), request)
+    serializer = ExamResultSerializer(page if page is not None else results_qs, many=True)
+
+    payload = {
+        'success': True,
+        'data': {
+            'class': {'id': int(class_id)},
+            'results': paginator.get_paginated_response(serializer.data).data if page is not None else {
+                'results': serializer.data,
+                'count': results_qs.count()
+            },
+            'statistics': {
+                'total_students': total_students,
+                'completed_exams': completed_exams,
+                'average_score': round(float(average_score), 2),
+                'highest_score': round(highest_score, 2),
+                'lowest_score': round(lowest_score, 2),
+                'grade_distribution': grade_counts
+            }
+        }
+    }
+
+    if page is not None:
+        return Response(payload)
+    return Response(payload)
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def get_exam_results(request, exam_id):
+    """
+    Get exam results (teachers/admins).
+    Teachers can only view results for their own exam.
+    Optional filter: status
+    """
+    try:
+        exam = Exam.objects.get(id=exam_id)
+    except Exam.DoesNotExist:
+        return Response({'success': False, 'message': 'Exam not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.user.role not in ['teacher', 'admin']:
+        return Response({'success': False, 'message': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+    if request.user.role == 'teacher' and exam.class_obj.teacher != request.user:
+        return Response({'success': False, 'message': 'You can only view results for your own exams'}, status=status.HTTP_403_FORBIDDEN)
+
+    results_qs = ExamResult.objects.filter(exam=exam)
+    status_filter = request.GET.get('status')
+    if status_filter:
+        results_qs = results_qs.filter(status=status_filter)
+
+    total_sessions = results_qs.count()
+    completed_sessions = results_qs.filter(status='graded').count()
+    average_score = results_qs.aggregate(avg=Avg('total_score'))['avg'] or 0
+    highest_score = float(results_qs.order_by('-total_score').values_list('total_score', flat=True).first() or 0)
+    lowest_score = float(results_qs.order_by('total_score').values_list('total_score', flat=True).first() or 0)
+
+    # Score distribution buckets
+    distribution = {'0-20': 0, '21-40': 0, '41-60': 0, '61-80': 0, '81-100': 0}
+    for s in results_qs.values_list('percentage', flat=True):
+        p = float(s or 0)
+        if p <= 20:
+            distribution['0-20'] += 1
+        elif p <= 40:
+            distribution['21-40'] += 1
+        elif p <= 60:
+            distribution['41-60'] += 1
+        elif p <= 80:
+            distribution['61-80'] += 1
+        else:
+            distribution['81-100'] += 1
+
+    paginator = StandardResultsSetPagination()
+    page = paginator.paginate_queryset(results_qs.order_by('-submitted_at'), request)
+    serializer = ExamResultSerializer(page if page is not None else results_qs, many=True)
+
+    data_results = paginator.get_paginated_response(serializer.data).data if page is not None else {
+        'results': serializer.data,
+        'count': results_qs.count()
+    }
+
+    return Response({
+        'success': True,
+        'data': {
+            'exam': {
+                'id': exam.id,
+                'title': exam.title,
+                'total_score': exam.total_score,
+                'minutes': exam.minutes
+            },
+            'results': data_results,
+            'statistics': {
+                'total_sessions': total_sessions,
+                'completed_sessions': completed_sessions,
+                'average_score': round(float(average_score), 2),
+                'highest_score': round(highest_score, 2),
+                'lowest_score': round(lowest_score, 2),
+                'completion_rate': round((completed_sessions / total_sessions * 100) if total_sessions > 0 else 0, 2),
+                'score_distribution': distribution
+            }
+        }
+    })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def get_student_results(request, student_id):
+    """
+    Get results for a specific student (teachers/admins).
+    Teachers are limited to their classes' exams.
+    Optional filters: class_id, exam_id
+    """
+    from accounts.models import User
+    try:
+        student = User.objects.get(id=student_id)
+    except User.DoesNotExist:
+        return Response({'success': False, 'message': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.user.role not in ['teacher', 'admin']:
+        return Response({'success': False, 'message': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+    results_qs = ExamResult.objects.filter(student=student)
+
+    class_id = request.GET.get('class_id')
+    exam_id = request.GET.get('exam_id')
+    if class_id:
+        results_qs = results_qs.filter(exam__class_obj_id=class_id)
+        if request.user.role == 'teacher':
+            # Ensure teacher owns the class
+            from classes.models import Class
+            try:
+                class_obj = Class.objects.get(id=class_id)
+            except Class.DoesNotExist:
+                return Response({'success': False, 'message': 'Class not found'}, status=status.HTTP_404_NOT_FOUND)
+            if class_obj.teacher != request.user:
+                return Response({'success': False, 'message': 'You can only view results for your own classes'}, status=status.HTTP_403_FORBIDDEN)
+    elif request.user.role == 'teacher':
+        # Limit to teacher's own classes if no class filter
+        results_qs = results_qs.filter(exam__class_obj__teacher=request.user)
+
+    if exam_id:
+        results_qs = results_qs.filter(exam_id=exam_id)
+
+    paginator = StandardResultsSetPagination()
+    page = paginator.paginate_queryset(results_qs.order_by('-submitted_at'), request)
+    serializer = ExamResultSerializer(page if page is not None else results_qs, many=True)
+
+    data_results = paginator.get_paginated_response(serializer.data).data if page is not None else {
+        'results': serializer.data,
+        'count': results_qs.count()
+    }
+
+    # Simple statistics for the student
+    total_exams = results_qs.values('exam_id').distinct().count()
+    completed_exams = results_qs.filter(status='graded').count()
+    average_score = results_qs.aggregate(avg=Avg('total_score'))['avg'] or 0
+    highest_score = float(results_qs.order_by('-total_score').values_list('total_score', flat=True).first() or 0)
+    lowest_score = float(results_qs.order_by('total_score').values_list('total_score', flat=True).first() or 0)
+
+    return Response({
+        'success': True,
+        'data': {
+            'student': {
+                'id': student.id,
+                'fullName': student.fullName,
+                'email': student.email,
+                'role': student.role
+            },
+            'results': data_results,
+            'statistics': {
+                'total_exams': total_exams,
+                'completed_exams': completed_exams,
+                'average_score': round(float(average_score), 2),
+                'highest_score': round(highest_score, 2),
+                'lowest_score': round(lowest_score, 2),
+                'improvement_trend': 'unknown'
+            }
+        }
+    })
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def grade_result(request, result_id):
+    """
+    Grade an exam result (teachers/admins). Allows updating feedback and status.
+    """
+    if request.user.role not in ['teacher', 'admin']:
+        return Response({'success': False, 'message': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        result = ExamResult.objects.select_related('exam__class_obj').get(id=result_id)
+    except ExamResult.DoesNotExist:
+        return Response({'success': False, 'message': 'Result not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.user.role == 'teacher' and result.exam.class_obj.teacher != request.user:
+        return Response({'success': False, 'message': 'You can only grade results for your own classes'}, status=status.HTTP_403_FORBIDDEN)
+
+    feedback = request.data.get('feedback')
+    status_value = request.data.get('status')
+
+    if status_value and status_value not in dict(ExamResult.STATUS_CHOICES):
+        return Response({'success': False, 'message': 'Invalid status value'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if feedback is not None:
+        result.feedback = feedback
+    if status_value is not None:
+        result.status = status_value
+    result.save()
+
+    serializer = ExamResultSerializer(result)
+    return Response({
+        'success': True,
+        'data': serializer.data,
+        'message': 'Exam graded successfully'
+    })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def get_result_detail(request, result_id):
+    """
+    Get result detail (student owner, class teacher, or admin).
+    """
+    try:
+        result = ExamResult.objects.select_related('session', 'exam__class_obj', 'student').get(id=result_id)
+    except ExamResult.DoesNotExist:
+        return Response({'success': False, 'message': 'Result not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not (
+        result.student_id == request.user.id or
+        (request.user.role == 'teacher' and result.exam.class_obj.teacher_id == request.user.id) or
+        request.user.role == 'admin'
+    ):
+        return Response({'success': False, 'message': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+    serializer = ExamResultSerializer(result)
+    return Response({
+        'success': True,
+        'data': serializer.data
+    })
